@@ -1,7 +1,6 @@
 [TOC]
 
 
----------------
 # Windows安装
 
 Windows下 Hermes 的安装使用的是 `scripts/install.ps1`，即使使用exe安装文件，背后也是下载执行的此脚本。
@@ -11,15 +10,16 @@ Windows下 Hermes 的安装使用的是 `scripts/install.ps1`，即使使用exe�
 
 以下是基于 Hermes 源码搭建 Windows 开发/运行环境的总结。
 
----
+-----------------------------------------------------------------------
 ## 目标
 
 基于已 clone 的 Hermes 源码，使用系统已有的 UV、Git、Node.js，在**不运行 `install.ps1`** 的前提下，手动搭建支持 CLI / TUI / Desktop 三种启动方式的开发环境。
 
----
+-----------------------------------------------------------------------
 ## `install.ps1`安装分析
 
-`install.ps1` 是 Hermes 在 Windows 平台的官方安装脚本（约 3400 行），设计为**完全自包含、用户级安装**，所有组件安装到 `%LOCALAPPDATA%\hermes\` 下，不需要管理员权限。
+`scripts\install.ps1` 是 Hermes 在 Windows 平台的官方安装脚本（约 3400 行），设计为**完全自包含、用户级安装**，
+所有组件**默认**安装到 `%LOCALAPPDATA%\hermes\` 下，不需要管理员权限。
 
 ### 设置的环境变量
 
@@ -36,7 +36,8 @@ Windows下 Hermes 的安装使用的是 `scripts/install.ps1`，即使使用exe�
 | `CSC_IDENTITY_AUTO_DISCOVERY` 等 | Session (临时) | 仅在 `-IncludeDesktop` 构建时清除签名相关变量 |
 | `ELECTRON_MIRROR` | Session (临时) | Electron 下载失败时临时设为国内镜像 |
 | `TEMP` / `TMP` | Session (临时) | 将 8.3 短路径名展开为长路径 |
-| `Path` (User) | 持久 | 追加 `$HermesHome\git\cmd`、`$HermesHome\git\bin`、`$HermesHome\git\usr\bin`、`$HermesHome\node`、`$InstallDir\venv\Scripts` |
+| `ProgressPreference` | Session (临时) | 设为 `SilentlyContinue`，抑制 `Invoke-WebRequest` 进度条避免下载速度骤降 |
+| `Path` (User) | 持久 | 追加 `$HermesHome\bin`（uv 安装目录）、`$HermesHome\git\cmd`、`$HermesHome\git\bin`、`$HermesHome\git\usr\bin`、`$HermesHome\node`、`$InstallDir\venv\Scripts` |
 
 其中 `%LOCALAPPDATA%`、`$HermesHome`、`$InstallDir` 这3个环境变量的默认值和它们之间的关系如下：
 
@@ -95,10 +96,12 @@ Windows下 Hermes 的安装使用的是 `scripts/install.ps1`，即使使用exe�
 | Python 依赖 | hermes-agent[all] + 传递依赖 | PyPI (通过 `uv sync --locked`) | `$InstallDir\venv\` |
 | Node 依赖 | npm workspace 依赖 | npm registry | `$InstallDir\node_modules\` |
 | Playwright Chromium | 浏览器引擎 | Playwright CDN | `%LOCALAPPDATA%\ms-playwright\` |
-| agent-browser | `agent-browser@^0.26.0` | npm 全局安装 | `$HermesHome\node\` |
+| agent-browser | `agent-browser@^0.26.0` + `@askjo/camofox-browser@^1.5.2` | npm 全局安装 | `$HermesHome\node\` |
 | Desktop (可选) | Electron + Hermes.exe | npm + GitHub Electron releases | `$InstallDir\apps\desktop\release\win-unpacked\` |
 | Skills | 内置 skills | 本地复制 | `$HermesHome\skills\` |
-| 配置模板 | `.env`、`config.yaml` | 从模板复制 | `$HermesHome\` |
+| 配置模板 | `.env`、`config.yaml`、`SOUL.md` | 从模板复制 | `$HermesHome\` |
+| Bootstrap 标记 | `.hermes-bootstrap-complete` | 写入 JSON | `$InstallDir\` |
+| Desktop 快捷方式(可选) | Start Menu + Desktop `.lnk` | 通过 WScript.Shell COM 创建 | `%Programs%\Hermes.lnk`、`Desktop\Hermes.lnk` |
 
 
 关于UV，脚本在 `Install-Uv` 函数中的策略是：
@@ -109,15 +112,17 @@ $managedUv = Join-Path $HermesHome "bin\uv.exe"   # 例如 C:\Users\data-\AppDat
 
 **它安装了一个"受管理的 uv"到 `$HermesHome\bin\uv.exe`**，逻辑如下：
 
-1. **先检查** `$HermesHome\bin\uv.exe` 是否已存在 → 若存在，直接使用，不重新下载
-2. **若不存在**，设置 `$env:UV_INSTALL_DIR = "$HermesHome\bin"`，然后运行 astral 官方安装脚本 `irm https://astral.sh/uv/install.ps1 | iex`
-3. **若官方安装失败**，提示用户手动安装
+1. 先检查 `$HermesHome\bin\uv.exe` 是否已存在 → 若存在，直接使用，不重新下载
+2. 若不存在，设置 `$env:UV_INSTALL_DIR = "$HermesHome\bin"`，然后运行 astral 官方安装脚本 `irm https://astral.sh/uv/install.ps1 | iex`
+3. 若官方安装失败，提示用户手动安装
 
 **是否会覆盖已有的 UV？**
 
-- ✅ **不会覆盖系统级 uv**：它把 uv 安装到 `%LOCALAPPDATA%\hermes\bin\uv.exe`，不碰 `%USERPROFILE%\.local\bin\uv.exe` 或 `%USERPROFILE%\.cargo\bin\uv.exe`。
-- ✅ **不会修改已有的 PATH 中的 uv**：脚本将 `$HermesHome\bin` 加到 User PATH 的**最前面**（`Set-PathVariable`），但这只影响 `hermes.exe` 的查找。uv 本身仅在脚本内部通过 `$script:UvCmd = $managedUv` 绝对路径调用，不会通过 PATH 查找。
-- ⚠️ **潜在 PATH 冲突**：`$HermesHome\bin` 被加到 User PATH 最前面，如果自己也有 uv 在 PATH 中，新终端里 `uv` 命令可能优先找到 Hermes 管理的版本。但这只影响终端中直接敲 `uv` 的情况，且 Hermes 内部始终用绝对路径调用自己的 uv。
+- ✅ 不会覆盖系统级 uv：它把 uv 安装到 `%LOCALAPPDATA%\hermes\bin\uv.exe`，不碰 `%USERPROFILE%\.local\bin\uv.exe` 或 `%USERPROFILE%\.cargo\bin\uv.exe`。
+- ✅ 不会修改已有的 PATH 中的 uv：脚本将 `$HermesHome\bin` 加到 User PATH 的**最前面**（`Set-PathVariable`），但这只影响 `hermes.exe` 的查找。uv 本身仅在脚本内部通过 `$script:UvCmd = $managedUv` 绝对路径调用，不会通过 PATH 查找。
+- ⚠️ 潜在 PATH 冲突：`$HermesHome\bin` 被加到 User PATH 最前面，如果自己也有 uv 在 PATH 中，新终端里 `uv` 命令可能优先找到 Hermes 管理的版本。但这只影响终端中直接敲 `uv` 的情况，且 Hermes 内部始终用绝对路径调用自己的 uv。
+
+注意：`Set-PathVariable` 函数负责将 `$HermesHome\bin` 和 `venv\Scripts` 写入 User PATH 最前面，这意味着 Hermes 管理的 uv 和 hermes.exe 在 PATH 中优先级最高。
 
 **如果不想让 Hermes 安装独立的 uv**，可以：
 
@@ -149,26 +154,86 @@ configure(交互) → gateway(交互)
 
 ### 关键设计特点
 
-- **自包含**：所有组件安装到 `%LOCALAPPDATA%\hermes\`，不依赖系统已有工具
+- **自包含**：所有组件安装到 `%LOCALAPPDATA%\hermes\`（`HermesHome`默认值），不依赖系统已有工具
 - **用户级**：不需要管理员权限，不修改系统级配置（除可选的 winget 安装 ripgrep/ffmpeg）
 - **独立 UV**：安装自己的 uv 到 `$HermesHome\bin\uv.exe`，并将该目录加入 User PATH 最前面，可能覆盖用户自己安装的 UV
 - **独立 Node.js**：下载便携版 Node.js，不依赖系统 Node.js
 - **独立 Git**：下载 PortableGit，不依赖系统 Git
 
----
+
+### 补充说明
+
+（1）**Python 依赖安装的分级回退策略**
+
+`Install-Dependencies` 采用四级回退策略，确保部分依赖不可用时仍能完成安装：
+
+| 层级 | 策略 | 说明 |
+|---|---|---|
+| Tier 0 | `uv sync --extra all --locked` | 哈希验证安装（优先），通过 `uv.lock` 中的 SHA256 校验所有传递依赖 |
+| Tier 1 | `uv pip install -e .[all]` | 从 PyPI 解析所有 curated extras |
+| Tier 2 | `uv pip install -e .[safeAll]` | 去除 `$brokenExtras` 列表中的已知问题 extras |
+| Tier 3 | `uv pip install -e .` | 最简安装，仅核心 CLI，无任何 extras |
+
+之后还有**基线导入验证**（检查 `dotenv/openai/rich/prompt_toolkit` 可导入）和 **Dashboard 依赖验证**（检查 `fastapi/uvicorn`）。
+
+（2）**环境变量补充说明**
+
+脚本中还有两个 Session 临时变量值得一提：
+
+- **`ProgressPreference`**：设为 `SilentlyContinue`，抑制 PowerShell 的 `Invoke-WebRequest` 逐字节进度条。Windows PowerShell 5.1 的进度 UI 对每个收到的字节同步重绘，在下载大文件（如 57MB 的 PortableGit）时会将下载速度降低 10-100 倍。
+- **`[Console]::OutputEncoding`**：强制设为 UTF-8，确保 npm/playwright 等原生命令的 box-drawing 字符和 Unicode 输出正确渲染，而非被 IBM437/Windows-1252 错误解码。
+
+（3）**配置模板阶段额外创建的文件**
+
+`Copy-ConfigTemplates` 除了 `.env` 和 `config.yaml`，还会创建 **`SOUL.md`**，这是一个全局 persona 文件，内容与 `hermes_cli/default_soul.py` 中的 `DEFAULT_SOUL_MD` 保持一致。
+
+**关键实现细节**：使用 `.NET` 的 `UTF8Encoding($false)` 直接写入（无 BOM），因为 PowerShell 5.1 的 `Set-Content -Encoding UTF8` 默认带 BOM，而 Hermes 的 prompt-injection 扫描器会将 BOM 标记为不可见 Unicode 字符并拒绝加载。
+
+（4）**Bootstrap 标记文件**
+
+`Write-BootstrapMarker` 在 `$InstallDir\.hermes-bootstrap-complete` 写入一个 JSON 文件，告知 Desktop 应用 "install.ps1 已成功运行，无需触发传统的首次启动 bootstrap"。
+结构包含 `schemaVersion`、`pinnedCommit`、`pinnedBranch`、`completedAt`。同样使用 BOM-less UTF-8 写入，因为 Node.js 的 `JSON.parse` 拒绝 BOM。
+
+（5）**Platform SDK 验证阶段**
+
+`Install-PlatformSdks` 阶段扫描 `.env` 中已配置的 Messaging Token，按需验证和补救对应的 SDK：
+
+| Token 环境变量 | 验证的导入 | 补救安装的 pip 包 |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | `telegram` | `python-telegram-bot[webhooks]>=22.6,<23` |
+| `DISCORD_BOT_TOKEN` | `discord` | `discord.py[voice]>=2.7.1,<3` |
+| `SLACK_BOT_TOKEN` | `slack_sdk` | `slack-sdk>=3.27.0,<4` |
+| `SLACK_APP_TOKEN` | `slack_bolt` | `slack-bolt>=1.18.0,<2` |
+| `WHATSAPP_ENABLED` | `qrcode` | `qrcode>=7.0,<8` |
+
+由于 `uv` 创建的 venv 不含 pip，该阶段会先通过 `python -m ensurepip --upgrade` 引导安装 pip，再逐个安装缺失的 SDK。
+
+（6）**Desktop 构建的容错机制**
+
+`Install-Desktop`（仅 `-IncludeDesktop` 时触发）包含多层容错：
+
+1. **npm 安装**：先尝试 `npm ci`（从 lockfile 精确安装），失败后回退到 `npm install`
+2. **Electron dist 自愈**：若 npm 安装失败且检测到 Electron 的 `dist/` 目录缺失，自动调用 `Try-RestoreElectronDist` 修复
+3. **构建重试**：`npm run pack` 失败后自动清除 Electron 下载缓存（`Clear-ElectronBuildCache`）并重试一次
+4. **镜像回退**：若 GitHub 下载仍失败，自动切换到 `https://npmmirror.com/mirrors/electron/` 国内镜像重试
+5. **构建后**：自动创建 Start Menu 和 Desktop 快捷方式，并通过 `ie4uinit.exe -show` 刷新图标缓存
+
+
+-----------------------------------------------------------------------
 ## 前提条件
 
-| 组件    | 状态                                         |
+| 组件     | 状态                                         |
 | ------- | -------------------------------------------- |
-| Git     | ✅ 已安装                                     |
-| UV      | ✅ 已安装                                     |
+| Git     | ✅ 已安装                                    |
+| UV      | ✅ 已安装                                    |
 | Node.js | ✅ v22.22，满足 `>=22.12` 的 Desktop 构建要求 |
-| 仓库    | ✅ 源码已 clone 到本地（当前目录）            |
+| 仓库    | ✅ 源码已 clone 到本地（当前目录）             |
 
----
-## HERMES_HOME 路径原理
+-----------------------------------------------------------------------
+## HERMES_HOME 路径说明
 
 Hermes 通过环境变量 `HERMES_HOME` 决定配置/数据/日志目录。
+
 核心逻辑在 `hermes_constants.py::_get_platform_default_hermes_home()`：
 
 ```shell
@@ -176,27 +241,29 @@ Hermes 通过环境变量 `HERMES_HOME` 决定配置/数据/日志目录。
 # Linux/macOS: ~/.hermes
 ```
 
-安装脚本 `install.ps1` 默认将 `HERMES_HOME` 写入 User 环境变量指向 `%LOCALAPPDATA%\hermes`，并向其中安装独立 UV、Node、Git 等。
+安装脚本 `install.ps1` 默认将 `HERMES_HOME` 设置为 `%LOCALAPPDATA%\hermes` 并写入 User 环境变量，并向其中安装独立 UV、Node、Git 等。
 
 **这里会跳过这些内容**，将 `HERMES_HOME` 设为当前项目内的 `.hermes` 目录，完全不影响系统环境。
 
----
+-----------------------------------------------------------------------
 ## 执行步骤
 
-以下所有命令在仓库根目录 `D:\Path\to\hermes-agent` 下执行。
+以下所有命令在已经clone的仓库根目录 `D:\Path\to\hermes-agent` 下执行。
 
 ### 1. 安装 Python 依赖
 
 使用 UV 工具安装依赖：
 
 ```powershell
-# 安装运行依赖
-uv sync
-# 安装开发依赖
+# 安装运行依赖（含 dev 开发依赖，debugpy、pytest、ruff 等）
 uv sync --extra dev
 ```
 
-开发依赖新增内容：`debugpy`、`pytest`、`pytest-asyncio`、`ruff`、`mcp`、`setuptools` 等。
+`uv sync` 会自动创建 `.venv` 虚拟环境并安装 `pyproject.toml` 中 `[project] dependencies` 声明的核心依赖。
+`--extra dev` 额外安装 `[project.optional-dependencies] dev` 中的开发工具：`debugpy`、`pytest`、`pytest-asyncio`、`ruff`、`mcp`、`setuptools` 等。
+
+> **注意**：`uv sync` 默认只安装核心依赖，不安装 `[all]` extra。`[all]` 中包含 `messaging`（Telegram/Discord/Slack 等平台 SDK）、`matrix`（mautrix 加密）等大量可选组件。
+> 这些可选组件在 Hermes 中通过 `tools/lazy_deps.py` 按需懒加载——当用户首次使用某个 provider 或平台时自动安装，无需手动预装。
 
 ### 2. 安装 Node.js workspace 依赖
 
@@ -229,6 +296,9 @@ Copy-Item "cli-config.yaml.example" ".hermes\config.yaml"
 
 编辑 `.hermes\.env`，至少填入一个 API Key（如 `OPENAI_API_KEY=sk-xxx`）。
 
+> **关于 SOUL.md**：`install.ps1` 的 `Copy-ConfigTemplates` 阶段还会从 `hermes_cli/default_soul.py` 中的 `DEFAULT_SOUL_MD` 内容创建 `SOUL.md`（全局 persona 文件）。
+> 开发环境中如果不创建此文件，Hermes 会使用内置默认 persona，不影响正常运行。如需自定义，可手动创建 `.hermes\SOUL.md`。
+
 ### 5. 设置 HERMES_HOME 环境变量
 
 ```powershell
@@ -245,12 +315,13 @@ $env:HERMES_HOME = $hermesHome
 .venv\Scripts\python.exe tools\skills_sync.py
 ```
 
+-----------------------------------------------------------------------
 ## 验证三种启动方式
 
 ### CLI 模式
 
 ```powershell
-python -m hermes_cli.main
+.venv\Scripts\python.exe -m hermes_cli.main
 ```
 
 基于 `prompt_toolkit` + `rich`，不依赖 Node.js。
@@ -258,11 +329,16 @@ python -m hermes_cli.main
 ### TUI 模式（终端 UI，热重载）
 
 ```powershell
-python -m hermes_cli.main --tui --dev
+.venv\Scripts\python.exe -m hermes_cli.main --tui --dev
 ```
 
 `--dev` 使 TUI 使用 `tsx src/entry.tsx`（源文件直接运行），修改 `ui-tui/src/` 后重启即生效。
 TUI 的 Ink 渲染器通过 JSON-RPC stdio 与 Python 后端 `tui_gateway` 通信。
+
+> **原理**：`cmd_chat()` 检测到 `--tui` 后调用 `_launch_tui()` → `_make_tui_argv()`。
+> `--dev` 模式下，`_make_tui_argv()` 构建 `tsx src/entry.tsx` 命令（而非 `node dist/entry.js`），
+> 同时自动执行 `npm install`（如 `node_modules` 缺失）和 `@hermes/ink` 包的预构建。
+> Python 进程通过 `subprocess.call()` spawn Node 子进程，自身等待子进程退出。
 
 ### Desktop 模式（Electron 窗口，热重载）
 
@@ -273,7 +349,7 @@ npm run dev --workspace apps/desktop
 同时启动 Vite dev server（`localhost:5174`，前端 HMR）和 Electron 窗口。
 修改 `apps/desktop/src/` 下的 React 代码即时反映；Electron 主进程修改需 Ctrl+C 后重新运行。
 
----
+-----------------------------------------------------------------------
 ## VS Code 调试配置
 
 在 `.vscode/launch.json` 中添加：
@@ -321,7 +397,7 @@ npm run dev --workspace apps/desktop
 }
 ```
 
----
+-----------------------------------------------------------------------
 ## 补充说明
 
 ### 未安装的可选组件
@@ -353,6 +429,9 @@ hermes-acp   = "acp_adapter.entry:main"
 | `hermes-agent.exe` | `run_agent:main` | 单次 agent 调用 (`AIAgent`)，无交互界面 |
 | `hermes-acp.exe` | `acp_adapter.entry:main` | ACP 适配器，VS Code / Zed / JetBrains 集成 |
 
+此外，`hermes_cli.main` 还注册了 `serve` 子命令（`cmd_dashboard()` 的 headless 模式），
+它是 `hermes dashboard` 的无浏览器版本，Desktop 的 Electron 主进程正是通过 spawn `python -m hermes_cli.main serve` 来启动后端的。
+
 这些 `.exe` **不是从源码编译的**，而是由 `distlib`（setuptools 依赖）生成的模板化 launcher，内容固定为：
 1. 硬编码指向 `.venv\Scripts\python.exe`
 2. 硬编码入口模块和函数名
@@ -381,22 +460,52 @@ hermes-acp   = "acp_adapter.entry:main"
 
 ```text
 ┌─ Desktop (Electron) ─────────────────────────┐
-│ 独立窗口，React UI (@assistant-ui/react)       │
-│ 后端: spawn hermes serve (tui_gateway 子进程)  │
-└───────────────────────────────────────────────┘
+│ 独立窗口，React UI (@assistant-ui/react)      │
+│ 后端: spawn python -m hermes_cli.main serve   │
+│       (tui_gateway HTTP/WebSocket 子进程)     │
+└──────────────────────────────────────────────┘
 
-┌─ TUI (--tui) ────────────────────────────────┐
-│ 终端内，Ink/React UI                          │
+┌─ TUI (--tui) ─────────────────────────────────┐
+│ 终端内，Ink/React UI (tsx/node 子进程)         │
 │ 后端: 同进程 tui_gateway (JSON-RPC over stdio) │
 └───────────────────────────────────────────────┘
 
 ┌─ CLI (默认) ─────────────────────────────────┐
-│ 终端内，纯文本 (prompt_toolkit + rich)          │
-│ 无分离前后端，全部在同一 Python 进程内          │
-└───────────────────────────────────────────────┘
+│ 终端内，纯文本 (prompt_toolkit + rich)        │
+│ 无分离前后端，全部在同一 Python 进程内         │
+└─────────────────────────────────────────────┘
 ```
 
 Desktop 和 TUI 共享同一套 `tui_gateway` JSON-RPC 协议，只是前端渲染层不同。
+
+### hermes serve 与 hermes desktop 子命令
+
+除了 `npm run dev --workspace apps/desktop`，还可以通过 Python CLI 子命令启动 Desktop：
+
+```powershell
+# 构建并启动 Desktop（等同于 npm run dev 的产品化版本）
+.venv\Scripts\python.exe -m hermes_cli.main desktop
+
+# 仅构建不启动（--build-only）
+.venv\Scripts\python.exe -m hermes_cli.main desktop --build-only
+
+# 跳过构建直接启动已有打包产物（--skip-build）
+.venv\Scripts\python.exe -m hermes_cli.main desktop --skip-build
+```
+
+`hermes desktop`（入口 `cmd_gui()`）内部流程：
+1. 检查 `apps/desktop/package.json` 是否存在
+2. 执行 `npm install`（如需要）→ `npm run build`（source 模式）或 `npm run pack`（packaged 模式）
+3. 启动 Electron（source 模式：`electron .`；packaged 模式：直接运行 `release/win-unpacked/Hermes.exe`）
+
+`hermes serve` 是 **headless 无浏览器版本**的后端，Desktop 的 Electron 主进程正是 spawn `hermes serve` 子进程来提供 JSON-RPC 服务：
+
+```powershell
+# 仅启动后端服务（不打开浏览器），监听 127.0.0.1:9119
+.venv\Scripts\python.exe -m hermes_cli.main serve --no-open
+```
+
+`hermes serve` 和 `hermes dashboard` 共享同一套 `start_server()` 函数，区别仅在于 `serve` 默认不打开浏览器。
 
 ### Desktop 模式 FAQ
 
@@ -428,13 +537,17 @@ npx electron .         # Electron 直接加载 dist/
 
 **Q3: Desktop模式下，Python 后端会自动启动吗？**
 
-会。Electron 主进程（`apps/desktop/electron/main.cjs`）在窗口就绪后自动 spawn `hermes serve` 子进程（即 `tui_gateway` 的 HTTP/WebSocket 版本），前端通过 JSON-RPC 与它通信。关闭 Electron 窗口时后端自动终止，无需手动管理。
+会。Electron 主进程（`apps/desktop/electron/main.cjs`）在窗口就绪后自动 spawn Python 后端子进程。
+后端解析优先级为 `HERMES_DESKTOP_HERMES_ROOT` → `SOURCE_REPO_ROOT`（仅开发模式）→ `ACTIVE_HERMES_ROOT`（从 `HERMES_HOME` 推导的 `$HERMES_HOME/hermes-agent`）。
+
+实际 spawn 的命令是 `python -m hermes_cli.main serve`（即 `tui_gateway` 的 HTTP/WebSocket 版本），
+前端通过 JSON-RPC over WebSocket 与它通信。关闭 Electron 窗口时后端自动终止，无需手动管理。
 
 ```
 npm run dev
   ├── Vite (:5174) — 前端 HMR
   └── Electron 主进程
-        └── spawn hermes serve (tui_gateway)
+        └── spawn python -m hermes_cli.main serve (tui_gateway)
               └── AIAgent + 工具执行 + 模型调用
 ```
 
@@ -492,7 +605,7 @@ cd apps/desktop
 npm run pack
 ```
 
-内部流程：`tsc` 编译 → `vite build` 打包前端 → `electron-builder --dir` 产出 `win-unpacked/`。
+内部流程：`npm run build`（`tsc -b` + `vite build` + stamp/native-deps 脚本）→ `npm run builder -- --dir`（`electron-builder --dir`）产出 `win-unpacked/`。
 
 产物位置：
 
@@ -565,8 +678,12 @@ HERMES_DESKTOP_HERMES_ROOT（最高）→ SOURCE_REPO_ROOT（仅开发模式）�
 | `hermes_constants.py` — `get_hermes_home()` | 所有路径查找的入口，读取 `HERMES_HOME` 环境变量 |
 | `hermes_cli/main.py` — `_launch_tui()` | TUI 启动逻辑，spawn Node.js 子进程 |
 | `hermes_cli/main.py` — `_make_tui_argv()` | TUI 的 Node 命令行构建，`--dev` 走 tsx |
-| `hermes_cli/subcommands/gui.py` | `hermes desktop` 命令入口 |
+| `hermes_cli/main.py` — `cmd_gui()` | `hermes desktop` 命令 handler，构建并启动 Electron |
+| `hermes_cli/main.py` — `cmd_dashboard()` | `hermes dashboard` / `hermes serve` 命令 handler |
+| `hermes_cli/subcommands/gui.py` | `hermes desktop` 子命令 argparse 定义 |
+| `hermes_cli/web_server.py` — `start_server()` | Dashboard / serve 的 HTTP + WebSocket 服务器 |
 | `apps/desktop/package.json` — `dev` script | Desktop 开发模式：Vite + Electron 并发 |
+| `apps/desktop/electron/main.cjs` | Electron 主进程，spawn Python 后端、窗口管理、自动更新 |
 | `pyproject.toml` — `[project.scripts]` | 三个控制台入口：`hermes` / `hermes-agent` / `hermes-acp` |
 | `pyproject.toml` — `[project.optional-dependencies] dev` | 开发依赖清单 |
 | `scripts/run_tests.sh` | 测试入口（需 Git Bash），设置 TZ=UTC 等 CI 一致环境 |
