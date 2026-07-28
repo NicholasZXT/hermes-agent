@@ -383,3 +383,567 @@ agent/turn_context.py, agent/turn_finalizer.py, agent/tool_executor.py
 6. **Profile 隔离** — 多实例通过 `HERMES_HOME` 完全隔离，使用 `get_hermes_home()` 而非硬编码 `~/.hermes`
 7. **依赖精确锁定** — 所有依赖使用 `==X.Y.Z` 精确版本，防止供应链攻击
 8. **同步核心，异步桥接** — Agent 循环是同步的，异步工具通过持久化 event loop 桥接
+
+
+-----------------------------------------------------------------------
+# Hermes配置
+
+参考官方文档：
+- [Using Hermes | Configuration](https://hermes-agent.nousresearch.com/docs/user-guide/configuration): 整体配置文件概览
+- [Using Hermes | Configuring Models](https://hermes-agent.nousresearch.com/docs/user-guide/configuring-models): 主模型/辅助模型配置指南
+- [Integrations | AI Providers](https://hermes-agent.nousresearch.com/docs/integrations/providers): 模型集成
+- [Reference | Configuration Reference | Environment Variables](https://hermes-agent.nousresearch.com/docs/reference/environment-variables): 环境变量参考手册，均可在`.env`文件使用。
+
+
+Hermes配置文件主要是两类：
+- `~/.hermes/config.yaml`: 模板文件为`cli-config.yaml.example`，主配置文件，用于存放非secrets配置。
+- `~/.hermes/.env`: 模板文件为`.env.example`，用于存放环境变量，主要是API-KEY等secrets配置。
+
+此外，命令行参数可以覆盖上述配置。
+
+## 模型配置
+
+### 一、LLM 模型配置加载机制全景
+
+Hermes 的模型配置加载是一个多层级的解析链，涉及如下五个层次：
+```text
+ProviderProfile（模型提供商定义）
+ → ProviderConfig（认证配置） 
+ → config.yaml（主配置） 
+ → .env（密钥） 
+ → 运行时解析（runtime_provider）
+```
+
+下面从 `hermes_cli/main.py` 的启动流程出发，逐层分析。
+
+#### 1.1 启动入口：配置加载的触发点
+
+在 `hermes_cli/main.py:main()` 中，启动流程按以下顺序加载配置：
+
+```
+main()
+  ├── _apply_profile_override()     ← 解析 -p/--profile 设置 HERMES_HOME
+  ├── load_hermes_dotenv()          ← 加载 ~/.hermes/.env 到 os.environ
+  ├── _setup_logging()              ← 初始化日志
+  └── cmd_chat(args)                ← 进入聊天
+        ├── _has_any_provider_configured()  ← 检测是否有可用提供商
+        ├── cmd_chat → cli_main()           ← 启动 CLI REPL
+        │     └── AIAgent.__init__()
+        │           └── agent/agent_init.py:init_agent()
+        │                 └── resolve_runtime_provider()  ← ★ 核心解析入口
+        └── 或 _launch_tui()                 ← 启动 TUI
+```
+
+关键点：
+- `.env` 文件在 `main()` 中通过 `load_hermes_dotenv()` 最早加载，将 API Key 等环境变量注入 `os.environ`
+- `config.yaml` 通过 `load_config()` 懒加载，首次调用时从 `~/.hermes/config.yaml` 读取并缓存
+- 模型提供商的最终解析发生在 `agent/agent_init.py:init_agent()` → `hermes_cli/runtime_provider.py:resolve_runtime_provider()`
+
+#### 1.2 两层注册表：ProviderProfile + ProviderConfig
+
+Hermes 有两层互补的提供商注册表：
+
+**第一层：`ProviderProfile`（`providers/` + `plugins/model-providers/`）**
+
+这是**声明式**的提供商元数据，定义在 `providers/base.py` 的 `ProviderProfile` dataclass 中：
+
+```python
+@dataclass
+class ProviderProfile:
+    name: str                        # 提供商标识符，如 "deepseek"
+    api_mode: str = "chat_completions"  # API 模式
+    aliases: tuple = ()              # 别名，如 ("deepseek-chat",)
+    env_vars: tuple = ()             # 需要的环境变量，如 ("DEEPSEEK_API_KEY",)
+    base_url: str = ""               # 默认 API 端点
+    auth_type: str = "api_key"       # 认证类型
+    display_name: str = ""           # 显示名称
+    fallback_models: tuple = ()      # 回退模型列表
+    # ... 以及 prepare_messages(), build_extra_body(), build_api_kwargs_extras() 等钩子
+```
+
+每个内置提供商在 `plugins/model-providers/<name>/__init__.py` 中实例化并注册。例如 DeepSeek：
+
+```python
+# plugins/model-providers/deepseek/__init__.py
+deepseek = DeepSeekProfile(
+    name="deepseek",
+    aliases=("deepseek-chat",),
+    env_vars=("DEEPSEEK_API_KEY",),
+    base_url="https://api.deepseek.com/v1",
+    # ...
+)
+register_provider(deepseek)
+```
+
+**发现机制**：`providers/__init__.py:_discover_providers()` 在首次调用 `get_provider_profile()` 或 `list_providers()` 时懒加载：
+1. 扫描 `<repo>/plugins/model-providers/<name>/`（内置插件）
+2. 扫描 `$HERMES_HOME/plugins/model-providers/<name>/`（用户插件，可覆盖内置）
+3. 扫描 `providers/<name>.py`（旧版单文件，向后兼容）
+
+**第二层：`ProviderConfig`（`hermes_cli/auth.py`）**
+
+这是**认证层面**的提供商配置，定义在 `hermes_cli/auth.py:PROVIDER_REGISTRY` 字典中：
+
+```python
+PROVIDER_REGISTRY = {
+    "deepseek": ProviderConfig(
+        id="deepseek",
+        name="DeepSeek",
+        auth_type="api_key",
+        inference_base_url="https://api.deepseek.com/v1",
+        api_key_env_vars=("DEEPSEEK_API_KEY",),
+        base_url_env_var="DEEPSEEK_BASE_URL",
+    ),
+    "openrouter": ProviderConfig(
+        id="openrouter",
+        name="OpenRouter",
+        auth_type="api_key",
+        inference_base_url="https://openrouter.ai/api/v1",
+        api_key_env_vars=("OPENROUTER_API_KEY", "OPENAI_API_KEY"),
+        base_url_env_var="OPENROUTER_BASE_URL",
+    ),
+    # ... 30+ 提供商
+}
+```
+
+此外，`auth.py` 还会自动从 `ProviderProfile` 注册表扩展 `PROVIDER_REGISTRY`（`_auto_extend_provider_registry_from_profiles()`），使得在 `plugins/model-providers/` 中新增的提供商无需修改 `auth.py` 即可被识别。
+
+**两层的关系**：
+- `ProviderProfile` 负责**传输层行为**（消息预处理、extra_body 构建、API 模式选择）
+- `ProviderConfig` 负责**认证层行为**（API Key 环境变量名、OAuth 流程、Base URL 覆盖）
+- 运行时通过 `resolve_runtime_provider()` 将两者合并为最终的 `{provider, api_key, base_url, api_mode}` 字典
+
+#### 1.3 运行时解析核心：`resolve_runtime_provider()`
+
+`hermes_cli/runtime_provider.py:resolve_runtime_provider()` 是模型配置加载的**最终仲裁者**，约 2000 行，解析顺序如下：
+
+```
+resolve_runtime_provider(requested, explicit_api_key, explicit_base_url)
+  │
+  ├── 1. resolve_requested_provider() → 确定 provider ID
+  │      ├── 命令行 --provider 标志
+  │      ├── config.yaml model.provider
+  │      └── "auto" → 自动检测
+  │
+  ├── 2. 特殊提供商短路
+  │      ├── "moa" → 虚拟 MoA 提供商
+  │      ├── "azure-foundry" → Azure Foundry 端点
+  │      └── "vertex" → GCP Vertex AI (OAuth2 token)
+  │
+  ├── 3. _resolve_named_custom_runtime()
+  │      └── 检查 config.yaml custom_providers[] 中的命名自定义提供商
+  │
+  ├── 4. resolve_provider("auto") 自动检测链
+  │      ├── 显式 CLI api_key/base_url → "openrouter"
+  │      ├── config.yaml model.provider
+  │      ├── OPENAI_API_KEY / OPENROUTER_API_KEY 环境变量
+  │      ├── OpenRouter 凭证池
+  │      ├── 遍历 PROVIDER_REGISTRY 中每个 api_key 提供商的 env vars
+  │      └── auth.json active_provider (OAuth 登录)
+  │
+  ├── 5. _resolve_explicit_runtime() → 按提供商类型分发
+  │      ├── "openrouter" → _resolve_openrouter_runtime()
+  │      ├── "nous" → resolve_nous_runtime_credentials()
+  │      ├── "anthropic" → resolve_api_key_provider_credentials()
+  │      ├── "openai-codex" → resolve_codex_runtime_credentials()
+  │      ├── "copilot" → resolve_api_key_provider_credentials()
+  │      └── 其他 → resolve_api_key_provider_credentials()
+  │
+  └── 6. 返回 {provider, api_mode, base_url, api_key, source, ...}
+```
+
+#### 1.4 配置优先级总结
+
+从高到低：
+
+| 优先级 | 来源 | 说明 |
+|--------|------|------|
+| 1 | 命令行参数 | `--provider`, `--model`, `--api-key`, `--base-url` |
+| 2 | 环境变量 | `os.environ`（含 `.env` 文件加载的值） |
+| 3 | `config.yaml` | `model.provider`, `model.default`, `model.base_url`, `model.api_key` |
+| 4 | `auth.json` | OAuth 登录后的 `active_provider` |
+| 5 | 自动检测 | 扫描各提供商的 API Key 环境变量 |
+| 6 | 默认值 | `DEFAULT_CONFIG` 中 `model: ""` (空字符串 = auto) |
+
+---
+
+### 二、不同模型提供商的环境变量
+
+**不同模型提供商使用不同的环境变量名。** 这些变量名在两个地方内置定义：
+
+#### 2.1 `ProviderProfile.env_vars`
+
+这是**声明式定义**，源码文件为`plugins/model-providers/<name>/__init__.py`，描述提供商需要哪些环境变量：
+
+| 提供商 | 环境变量 | 定义位置 |
+|--------|---------|---------|
+| DeepSeek | `DEEPSEEK_API_KEY` | `plugins/model-providers/deepseek/__init__.py` |
+| OpenRouter | `OPENROUTER_API_KEY` | `plugins/model-providers/openrouter/__init__.py` |
+| Anthropic | `ANTHROPIC_API_KEY`, `ANTHROPIC_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` | `plugins/model-providers/anthropic/__init__.py` |
+| Novita | `NOVITA_API_KEY` | `plugins/model-providers/novita/__init__.py` |
+| NVIDIA | `NVIDIA_API_KEY` | `plugins/model-providers/nvidia/__init__.py` |
+
+#### 2.2 `ProviderConfig.api_key_env_vars`
+
+这是**认证层面的定义**，源码文件`hermes_cli/auth.py:PROVIDER_REGISTRY`，支持多个回退环境变量：
+
+```python
+PROVIDER_REGISTRY = {
+    "openrouter": ProviderConfig(
+        api_key_env_vars=("OPENROUTER_API_KEY", "OPENAI_API_KEY"),  # 两个回退
+    ),
+    "gemini": ProviderConfig(
+        api_key_env_vars=("GOOGLE_API_KEY", "GEMINI_API_KEY"),      # 两个回退
+    ),
+    "zai": ProviderConfig(
+        api_key_env_vars=("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),  # 三个回退
+    ),
+    "copilot": ProviderConfig(
+        api_key_env_vars=("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"),
+    ),
+    "anthropic": ProviderConfig(
+        api_key_env_vars=("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
+    ),
+    # ... 每个提供商都有独立的 api_key_env_vars
+}
+```
+
+#### 2.3 完整环境变量映射表
+
+| 提供商 ID | API Key 环境变量 | Base URL 环境变量 |
+|-----------|-----------------|-------------------|
+| `openrouter` | `OPENROUTER_API_KEY`, `OPENAI_API_KEY` | `OPENROUTER_BASE_URL` |
+| `anthropic` | `ANTHROPIC_API_KEY`, `ANTHROPIC_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` | `ANTHROPIC_BASE_URL` |
+| `gemini` | `GOOGLE_API_KEY`, `GEMINI_API_KEY` | `GEMINI_BASE_URL` |
+| `deepseek` | `DEEPSEEK_API_KEY` | `DEEPSEEK_BASE_URL` |
+| `zai` | `GLM_API_KEY`, `ZAI_API_KEY`, `Z_AI_API_KEY` | `GLM_BASE_URL` |
+| `kimi-coding` | `KIMI_API_KEY`, `KIMI_CODING_API_KEY` | `KIMI_BASE_URL` |
+| `kimi-coding-cn` | `KIMI_CN_API_KEY` | — |
+| `minimax` | `MINIMAX_API_KEY` | `MINIMAX_BASE_URL` |
+| `minimax-cn` | `MINIMAX_CN_API_KEY` | `MINIMAX_CN_BASE_URL` |
+| `xai` | `XAI_API_KEY` | `XAI_BASE_URL` |
+| `alibaba` | `DASHSCOPE_API_KEY` | `DASHSCOPE_BASE_URL` |
+| `nvidia` | `NVIDIA_API_KEY` | `NVIDIA_BASE_URL` |
+| `huggingface` | `HF_TOKEN` | `HF_BASE_URL` |
+| `xiaomi` | `XIAOMI_API_KEY` | `XIAOMI_BASE_URL` |
+| `gmi` | `GMI_API_KEY` | `GMI_BASE_URL` |
+| `stepfun` | `STEPFUN_API_KEY` | `STEPFUN_BASE_URL` |
+| `arcee` | `ARCEEAI_API_KEY` | `ARCEE_BASE_URL` |
+| `novita` | `NOVITA_API_KEY` | `NOVITA_BASE_URL` |
+| `copilot` | `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` | `COPILOT_API_BASE_URL` |
+| `ollama-cloud` | `OLLAMA_API_KEY` | `OLLAMA_BASE_URL` |
+| `kilocode` | `KILOCODE_API_KEY` | `KILOCODE_BASE_URL` |
+| `opencode-zen` | `OPENCODE_ZEN_API_KEY` | `OPENCODE_ZEN_BASE_URL` |
+| `tencent-tokenhub` | `TOKENHUB_API_KEY` | `TOKENHUB_BASE_URL` |
+| `azure-foundry` | `AZURE_FOUNDRY_API_KEY` | `AZURE_FOUNDRY_BASE_URL` |
+| `bedrock` | (使用 AWS SDK 凭据链) | `BEDROCK_BASE_URL` |
+| `lmstudio` | `LM_API_KEY`（可选） | `LM_BASE_URL` |
+
+---
+
+### 三、配置方式
+
+API_KEY 和 BASE_URL 在 config.yaml / .env 中的配置方式如下。
+
+#### 3.1 `.env` 文件 — 仅存放 Secrets
+
+`.env` 文件遵循 **"`.env` is for secrets only"** 原则。
+
+所有 API Key、Token、密码存放在此：
+
+```bash
+# ~/.hermes/.env
+# 推荐方式：OpenRouter（聚合 300+ 模型）
+OPENROUTER_API_KEY=sk-or-v1-xxxx
+
+# 或者直连提供商
+DEEPSEEK_API_KEY=sk-xxxx
+ANTHROPIC_API_KEY=sk-ant-xxxx
+GOOGLE_API_KEY=AIzaxxxx
+DASHSCOPE_API_KEY=sk-xxxx
+
+# 自定义端点的 Base URL（可选覆盖）
+OPENROUTER_BASE_URL=https://my-proxy.example.com/api/v1
+```
+
+`.env` 的加载发生在 `hermes_cli/main.py:_apply_profile_override()` 之后：
+
+```python
+# hermes_cli/main.py
+from hermes_cli.env_loader import load_hermes_dotenv
+load_hermes_dotenv(project_env=PROJECT_ROOT / ".env")
+```
+
+读取优先级：`os.environ` > `.env` 文件（通过 `get_env_value()` 和 `get_env_value_prefer_dotenv()` 控制）。
+
+#### 3.2 `config.yaml` — 存放所有非 Secrets 配置
+
+`config.yaml` 是模型和端点配置的**唯一来源**（官方文档明确指出 `.env` 中的 `OPENAI_BASE_URL` 和 `LLM_MODEL` 已被移除）。
+
+**主模型配置：**
+
+```yaml
+# ~/.hermes/config.yaml
+model:
+  provider: "openrouter"                   # 提供商 ID
+  default: "anthropic/claude-opus-4.6"     # 默认模型（也支持 "model" 作为键名）
+  base_url: "https://openrouter.ai/api/v1" # API 端点（切换提供商时自动清除）
+  api_key: ""                              # 可选：直接写在 config 中（不推荐，应用 .env）
+  api_mode: "chat_completions"             # API 模式（chat_completions / anthropic_messages）
+  context_length: 131072                   # 可选：手动覆盖上下文窗口
+  max_tokens: 8192                         # 可选：输出 token 上限
+```
+
+**命名自定义提供商（多个端点）：**
+
+```yaml
+# ~/.hermes/config.yaml
+custom_providers:
+  - name: "together"
+    base_url: "https://api.together.xyz/v1"
+    key_env: "TOGETHER_API_KEY"          # 引用 .env 中的环境变量名
+    models:
+      qwen3.5:27b:
+        context_length: 32768
+
+  - name: "local"
+    base_url: "http://localhost:11434/v1"
+    # api_key 省略 → Hermes 使用 "no-key-required" 模式
+
+model:
+  provider: "custom:together"            # 使用命名自定义提供商
+  default: "MiniMaxAI/MiniMax-M2.7"
+```
+
+**Ollama / vLLM / 本地模型：**
+
+```yaml
+# ~/.hermes/config.yaml
+model:
+  default: "qwen2.5-coder:32b"
+  provider: "custom"
+  base_url: "http://localhost:11434/v1"
+  context_length: 32768                   # 重要：覆盖 Ollama 默认的小上下文窗口
+```
+
+**OpenRouter 提供商路由：**
+
+```yaml
+# ~/.hermes/config.yaml
+provider_routing:
+  sort: "throughput"                      # price / throughput / latency
+  only: ["anthropic"]                     # 仅使用这些提供商
+  ignore: ["deepinfra"]                   # 跳过这些提供商
+  require_parameters: true                # 仅使用支持所有参数的提供商
+```
+
+**故障转移链：**
+
+```yaml
+# ~/.hermes/config.yaml
+fallback_providers:
+  - provider: "openrouter"
+    model: "anthropic/claude-sonnet-4"
+  - provider: "anthropic"
+    model: "claude-sonnet-4"
+  - provider: "deepseek"
+    model: "deepseek-chat"
+```
+
+#### 3.3 配置的读取路径
+
+```python
+# hermes_cli/config.py
+def load_config() -> Dict[str, Any]:
+    """从 ~/.hermes/config.yaml 加载，与 DEFAULT_CONFIG 深度合并，缓存结果。"""
+    # 缓存键 = (path, mtime_ns, size)，文件未变时返回缓存副本
+    ...
+
+def get_env_value(key: str) -> Optional[str]:
+    """先查 os.environ，再查 .env 文件。"""
+    ...
+
+def get_env_value_prefer_dotenv(key: str) -> Optional[str]:
+    """优先 .env 文件（用于凭证轮转场景，防止 shell 中的旧值覆盖）。"""
+    ...
+```
+
+---
+
+### 四、主模型 / 辅助（副）模型的配置
+
+Hermes 使用**两类模型槽位**：
+
+| 类型 | 用途 | 配置路径 |
+|------|------|----------|
+| **主模型 (Main)** | Agent 的思考核心，处理每条用户消息、工具调用循环、流式响应 | `config.yaml` → `model:` |
+| **辅助模型 (Auxiliary)** | 边缘任务：视觉分析、网页摘要、上下文压缩、审批、标题生成等 11 个槽位 | `config.yaml` → `auxiliary:` |
+
+#### 4.1 主模型配置
+
+```yaml
+# ~/.hermes/config.yaml
+model:
+  provider: "openrouter"
+  default: "anthropic/claude-opus-4.7"
+  base_url: ""
+  api_mode: "chat_completions"
+```
+
+也可以通过以下方式配置：
+- **`hermes model`** 交互式向导（终端中运行，非会话内）
+- **`/model`** 斜杠命令（会话内热切换）
+- **仪表板** → Models 页面 → Change 按钮
+
+#### 4.2 辅助模型配置
+
+辅助模型默认全部为 `auto`，即使用主模型。
+
+可以在 `config.yaml` 中按任务覆盖：
+
+```yaml
+# ~/.hermes/config.yaml
+auxiliary:
+  # 视觉分析（图片/截图）
+  vision:
+    provider: "openrouter"
+    model: "google/gemini-2.5-flash"
+    timeout: 30
+    download_timeout: 30
+
+  # 上下文压缩
+  compression:
+    provider: "openrouter"
+    model: "google/gemini-3-flash-preview"
+
+  # 网页提取/摘要
+  web_extract:
+    provider: "auto"      # 使用主模型
+    model: ""
+
+  # 智能审批
+  approval:
+    provider: "openrouter"
+    model: "openai/gpt-5-mini"
+
+  # 会话标题生成
+  title_generation:
+    provider: "openrouter"
+    model: "google/gemini-3-flash-preview"
+
+  # MCP 工具路由
+  mcp:
+    provider: "auto"
+    model: ""
+
+  # 技能搜索
+  skills_hub:
+    provider: "auto"
+    model: ""
+
+  # TTS 音频标签
+  tts_audio_tags:
+    provider: "auto"
+    model: ""
+
+  # Kanban 相关
+  triage_specifier:
+    provider: "auto"
+    model: ""
+  kanban_decomposer:
+    provider: "auto"
+    model: ""
+
+  # 自动 Profile 描述
+  profile_describer:
+    provider: "auto"
+    model: ""
+
+  # 技能策展审查
+  curator:
+    provider: "auto"
+    model: ""
+```
+
+#### 4.3 辅助模型的 `auto` 解析链
+
+当 `auxiliary.<task>.provider: "auto"` 时，`agent/auxiliary_client.py:_resolve_auto()` 按以下顺序解析：
+
+```
+Step 1: 使用主模型的 provider + model（最优先）
+  └── 如果主提供商被 402 标记为 unhealthy，跳过
+
+Step 2: 用户配置的 fallback 链
+  └── 检查 fallback_providers / fallback_model
+
+Step 3: 硬编码的提供商发现链（文本任务）
+  ├── OpenRouter (OPENROUTER_API_KEY)
+  ├── Nous Portal (auth.json)
+  ├── Custom endpoint (config.yaml model.base_url)
+  ├── Native Anthropic
+  └── 直接 API-key 提供商 (z.ai/GLM, Kimi, MiniMax...)
+
+Step 3-视觉: 硬编码的提供商发现链（视觉任务）
+  ├── 主提供商（如果支持视觉）
+  ├── OpenRouter
+  ├── Nous Portal
+  ├── Native Anthropic
+  └── Custom endpoint（本地视觉模型）
+```
+
+#### 4.4 常见辅助模型覆盖模式
+
+| 任务 | 推荐配置 | 原因 |
+|------|---------|------|
+| Title Gen | `gemini-3-flash-preview` | $0.10/M tokens，效果与 Opus 相当 |
+| Vision | `gemini-2.5-flash` 或 `gpt-4o-mini` | 主模型是不支持视觉的编程模型时需要 |
+| Compression | 快速 chat 模型 | 以 1/50 成本完成摘要 |
+| Approval | `haiku` / `flash` / `gpt-5-mini` | 审批不需要推理能力 |
+| Web Extract | 同 Compression | 摘要任务不需要推理 |
+
+---
+
+### 五、配置架构总结
+
+```mermaid
+flowchart TB
+    subgraph 定义层["定义层（内置）"]
+        PP["ProviderProfile<br/>providers/base.py<br/>+ plugins/model-providers/"]
+        PC["ProviderConfig<br/>hermes_cli/auth.py<br/>PROVIDER_REGISTRY"]
+    end
+
+    subgraph 用户配置["用户配置层"]
+        ENV[".env 文件<br/>API_KEY=xxx<br/>（仅 Secrets）"]
+        YAML["config.yaml<br/>model:, auxiliary:,<br/>custom_providers:,<br/>fallback_providers:"]
+    end
+
+    subgraph 解析层["运行时解析层"]
+        RP["resolve_runtime_provider()<br/>hermes_cli/runtime_provider.py"]
+        AUX["_resolve_auto()<br/>agent/auxiliary_client.py"]
+    end
+
+    subgraph 消费者["消费者"]
+        AGENT["AIAgent<br/>主对话循环"]
+        VISION["vision_analyze"]
+        COMPRESS["context_compression"]
+        WEB["web_extract"]
+        TITLE["title_generation"]
+    end
+
+    定义层 --> 解析层
+    用户配置 --> 解析层
+    RP --> AGENT
+    AUX --> VISION
+    AUX --> COMPRESS
+    AUX --> WEB
+    AUX --> TITLE
+    RP -.->|"provider=auto 时"| AUX
+```
+
+**核心设计原则**：
+1. 两层注册表分离关注点：`ProviderProfile` 管传输行为，`ProviderConfig` 管认证凭据
+2. `.env` 仅存密钥：API Key 绝不写入 `config.yaml`（虽然技术上支持 `model.api_key` 字段）
+3. `config.yaml` 是模型配置的**唯一来源**：`OPENAI_BASE_URL` 等旧版环境变量已被移除
+4. 懒加载 + 缓存：提供商发现和配置读取都是懒加载的，首次使用后缓存
+5. 多级回退链：辅助模型在 `auto` 模式下有完整的 fallback 链，确保即使主提供商不可用也能降级工作
+
