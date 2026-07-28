@@ -803,3 +803,22 @@ HERMES_DESKTOP_HERMES_ROOT（最高）
 | `pyproject.toml` — `[project.scripts]` | 三个控制台入口：`hermes` / `hermes-agent` / `hermes-acp` |
 | `pyproject.toml` — `[project.optional-dependencies] dev` | 开发依赖清单 |
 | `scripts/run_tests.sh` | 测试入口（需 Git Bash），设置 TZ=UTC 等 CI 一致环境 |
+
+
+### 定制化部署
+
+此文档中总结的部署操作步骤完全可以用于定制化部署Hermes，代替 `install.ps1`，控制Hermes的部署路径和数据目录。
+
+Hermes 的核心工作方式就是：**`HERMES_HOME` 决定一切**。
+只要设置了这个变量，Python 代码中所有路径都通过 `get_hermes_home()` 解析，所以把数据目录放在哪都行。
+
+更新Hermes的流程，也只需要拉取main分支最新代码，对于Desktop模式重新执行Electron应用构建过程即可。
+
+`hermes update`命令执行的也是上述操作（参考 `cmd_update` 函数，`main.py` 第 9064 行起）。
+
+此定制化部署方案有如下优势：
+- 完全控制安装路径：`HERMES_HOME` 可以指向任意目录，不影响系统环境
+- 不修改`PATH`：不会污染系统环境变量
+- 复用已有工具链：使用系统已有的 UV、Git、Node.js
+- 更新简单：`git pull` + `uv sync` + `npm ci` + 重新构建 Desktop 即可
+- **多实例共存**：可以同时维护多个不同版本的开发环境（通过不同的 `HERMES_HOME` 和 checkout 目录）
