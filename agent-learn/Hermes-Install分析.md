@@ -11,11 +11,6 @@ Windows下 Hermes 的安装使用的是 `scripts/install.ps1`，即使使用exe�
 以下是基于 Hermes 源码搭建 Windows 开发/运行环境的总结。
 
 -----------------------------------------------------------------------
-## 目标
-
-基于已 clone 的 Hermes 源码，使用系统已有的 UV、Git、Node.js，在**不运行 `install.ps1`** 的前提下，手动搭建支持 CLI / TUI / Desktop 三种启动方式的开发环境。
-
------------------------------------------------------------------------
 ## `install.ps1`安装分析
 
 `scripts\install.ps1` 是 Hermes 在 Windows 平台的官方安装脚本（约 3400 行），设计为**完全自包含、用户级安装**，
@@ -30,14 +25,16 @@ Windows下 Hermes 的安装使用的是 `scripts/install.ps1`，即使使用exe�
 | `UV_INSTALL_DIR` | Session (临时) | 安装 uv 时设置，指向 `$HermesHome\bin` |
 | `UV_PYTHON` | Session (临时) | 固定到 venv 的 Python 解释器，防止用户环境的 `UV_PYTHON` 覆盖 |
 | `VIRTUAL_ENV` | Session (临时) | 指向 venv 目录 |
-| `UV_PROJECT_ENVIRONMENT` | Session (临时) | 防止现代 uv (≥0.5) 将 `uv sync` 安装到 sibling `.venv\` |
+| `UV_PROJECT_ENVIRONMENT` | Session (临时) | 防止现代 uv (≥0.5) 将 `uv sync` 安装到 sibling `.venv\` 而非 `$InstallDir\venv\`。uv 0.5+ 默认将依赖安装到项目根目录下的 `.venv\`（而非 `venv\`），设置此变量强制指向正确的 venv 路径 |
 | `AGENT_BROWSER_EXECUTABLE_PATH` | 写入 `$HermesHome\.env` | 用户显式指定浏览器路径时写入 |
 | `GIT_CONFIG_COUNT/KEY_0/VALUE_0` | Session (临时) | 设置 `windows.appendAtomically=false` 解决 Windows git 原子写入问题 |
 | `CSC_IDENTITY_AUTO_DISCOVERY` 等 | Session (临时) | 仅在 `-IncludeDesktop` 构建时清除签名相关变量 |
 | `ELECTRON_MIRROR` | Session (临时) | Electron 下载失败时临时设为国内镜像 |
 | `TEMP` / `TMP` | Session (临时) | 将 8.3 短路径名展开为长路径 |
 | `ProgressPreference` | Session (临时) | 设为 `SilentlyContinue`，抑制 `Invoke-WebRequest` 进度条避免下载速度骤降 |
-| `Path` (User) | 持久 | 追加 `$HermesHome\bin`（uv 安装目录）、`$HermesHome\git\cmd`、`$HermesHome\git\bin`、`$HermesHome\git\usr\bin`、`$HermesHome\node`、`$InstallDir\venv\Scripts` |
+| `Path` (User) | 持久 | 追加 `$HermesHome\git\cmd`、`$HermesHome\git\bin`、`$HermesHome\git\usr\bin`（由 `Install-Git` 添加）、`$HermesHome\node`（由 `Test-Node` 便携版安装时添加）、`$InstallDir\venv\Scripts`（由 `Set-PathVariable` 添加） |
+
+> **注意**：`$HermesHome\bin`（uv 安装目录）**不会**被添加到 User PATH。`Set-PathVariable` 只添加 `$InstallDir\venv\Scripts`，Git 和 Node 各自在其安装函数内部独立管理 PATH 条目。
 
 其中 `%LOCALAPPDATA%`、`$HermesHome`、`$InstallDir` 这3个环境变量的默认值和它们之间的关系如下：
 
@@ -132,7 +129,7 @@ $managedUv = Join-Path $HermesHome "bin\uv.exe"   # 例如 C:\Users\data-\AppDat
 
 ### 执行入口
 
-安装完成后，`$InstallDir\venv\Scripts\` 被添加到 User PATH，新终端中可直接使用：
+安装完成后，`$InstallDir\venv\Scripts\hermes.exe` 被添加到 User PATH，新终端中可直接使用：
 
 ```powershell
 hermes              # 启动交互式聊天 (CLI)
@@ -187,6 +184,8 @@ configure(交互) → gateway(交互)
 
 `Copy-ConfigTemplates` 除了 `.env` 和 `config.yaml`，还会创建 **`SOUL.md`**，这是一个全局 persona 文件，内容与 `hermes_cli/default_soul.py` 中的 `DEFAULT_SOUL_MD` 保持一致。
 
+此外，该阶段还会创建 `$HermesHome` 下的子目录结构（`cron`、`sessions`、`logs`、`pairing`、`hooks`、`image_cache`、`audio_cache`、`memories`、`skills`），并调用 `tools\skills_sync.py` 将内置 skills 同步到 `$HermesHome\skills`。
+
 **关键实现细节**：使用 `.NET` 的 `UTF8Encoding($false)` 直接写入（无 BOM），因为 PowerShell 5.1 的 `Set-Content -Encoding UTF8` 默认带 BOM，而 Hermes 的 prompt-injection 扫描器会将 BOM 标记为不可见 Unicode 字符并拒绝加载。
 
 （4）**Bootstrap 标记文件**
@@ -220,6 +219,12 @@ configure(交互) → gateway(交互)
 
 
 -----------------------------------------------------------------------
+## 目标
+
+基于已 clone 的 Hermes 源码，使用系统已有的 UV、Git、Node.js，在**不运行 `install.ps1`** 的前提下，手动搭建支持 CLI / TUI / Desktop 三种启动方式的开发环境。
+
+
+-----------------------------------------------------------------------
 ## 前提条件
 
 | 组件     | 状态                                         |
@@ -228,6 +233,19 @@ configure(交互) → gateway(交互)
 | UV      | ✅ 已安装                                    |
 | Node.js | ✅ v22.22，满足 `>=22.12` 的 Desktop 构建要求 |
 | 仓库    | ✅ 源码已 clone 到本地（当前目录）             |
+
+
+关键原理：
+
+（1）Hermes 通过 `HERMES_HOME` 环境变量决定配置/数据目录。
+- 默认值是 `%LOCALAPPDATA%\hermes`，只需设置该变量即可重定向到任意位置。
+- Python 代码中所有路径查找都通过 `get_hermes_home()` 读取此变量（见 `hermes_constants.py`），不硬编码路径。
+
+（2）TUI 和 Desktop 对 Node.js 的依赖：
+- TUI: `_launch_tui()` 在 `main.py` 中执行，它 spawn 一个 Node.js 子进程运行 ui-tui 下的 Ink 应用。生产模式读取 `dist/entry.js`（esbuild 打包产物），`--dev` 模式使用 `tsx src/entry.tsx`（热重载）。
+- Desktop: Electron 主进程（`main.cjs`）启动后 `spawn hermes serve` 子进程作为后端。开发模式下 Vite + Electron 各自独立进程，前端热重载。
+
+
 
 -----------------------------------------------------------------------
 ## HERMES_HOME 路径说明
@@ -284,26 +302,49 @@ npm ci
 ### 3. 创建 HERMES_HOME 目录结构
 
 ```powershell
-New-Item -ItemType Directory -Force -Path ".hermes\logs", ".hermes\sessions", ".hermes\skills", ".hermes\cron", ".hermes\memories", ".hermes\pairing", ".hermes\hooks", ".hermes\image_cache", ".hermes\audio_cache"
+# 假设要放到当前目录下
+$hermesHome = ".hermes"
+
+New-Item -ItemType Directory -Force -Path "$hermesHome\logs"
+New-Item -ItemType Directory -Force -Path "$hermesHome\sessions"
+New-Item -ItemType Directory -Force -Path "$hermesHome\skills"
+New-Item -ItemType Directory -Force -Path "$hermesHome\cron"
+New-Item -ItemType Directory -Force -Path "$hermesHome\memories"
+New-Item -ItemType Directory -Force -Path "$hermesHome\pairing"
+New-Item -ItemType Directory -Force -Path "$hermesHome\hooks"
+New-Item -ItemType Directory -Force -Path "$hermesHome\image_cache"
+New-Item -ItemType Directory -Force -Path "$hermesHome\audio_cache"
 ```
 
 ### 4. 复制配置文件
 
 ```powershell
-Copy-Item ".env.example" ".hermes\.env"
-Copy-Item "cli-config.yaml.example" ".hermes\config.yaml"
+# .env — API keys
+Copy-Item ".env.example" "$hermesHome\.env"
+# config.yaml — 行为配置
+Copy-Item "cli-config.yaml.example" "$hermesHome\config.yaml"
 ```
 
 编辑 `.hermes\.env`，至少填入一个 API Key（如 `OPENAI_API_KEY=sk-xxx`）。
 
 > **关于 SOUL.md**：`install.ps1` 的 `Copy-ConfigTemplates` 阶段还会从 `hermes_cli/default_soul.py` 中的 `DEFAULT_SOUL_MD` 内容创建 `SOUL.md`（全局 persona 文件）。
-> 开发环境中如果不创建此文件，Hermes 会使用内置默认 persona，不影响正常运行。如需自定义，可手动创建 `.hermes\SOUL.md`。
+> 开发环境中如果不创建此文件，Hermes 会使用内置默认 persona，不影响正常运行。如需自定义，可手动创建 `.hermes\SOUL.md`：
+>
+> ```powershell
+> # 可选：创建 SOUL.md 全局 persona 文件（与 install.ps1 行为一致）
+> # 以下内容可以从 install.ps1 中进行复制，但是要注意编码。
+> @"
+> You are Hermes Agent, an intelligent AI assistant created by Nous Research. You are helpful, knowledgeable, and direct. You assist users with a wide range of tasks including answering questions, writing and editing code, analyzing information, creative work, and executing actions via your tools. You communicate clearly, admit uncertainty when appropriate, and prioritize being genuinely useful over being verbose unless otherwise directed below. Be targeted and efficient in your exploration and investigations.
+> "@ | Out-File -FilePath "$hermesHome\SOUL.md" -Encoding utf8NoBOM
+> ```
 
 ### 5. 设置 HERMES_HOME 环境变量
 
 ```powershell
 $hermesHome = (Resolve-Path ".hermes").ProviderPath
+# 当前终端会话
 $env:HERMES_HOME = $hermesHome
+# 持久化（可选，省去每次手动设置）
 [Environment]::SetEnvironmentVariable("HERMES_HOME", $hermesHome, "User")
 ```
 
@@ -316,19 +357,32 @@ $env:HERMES_HOME = $hermesHome
 ```
 
 -----------------------------------------------------------------------
-## 验证三种启动方式
+## 三种模式说明
 
+配置好后，Hermes 主要提供了三种用户交互界面：
+
+| 入口           | 类型         | 技术栈                           |
+| -------------- | ------------ | -------------------------------- |
+| **CLI** (默认) | 终端文本界面 | Python `prompt_toolkit` + `rich` |
+| **TUI**        | 终端图形界面 | Node.js Ink (React) 渲染在终端   |
+| **Desktop**    | 独立窗口应用 | Electron + React                 |
+
+---
 ### CLI 模式
 
 ```powershell
 .venv\Scripts\python.exe -m hermes_cli.main
 ```
 
-基于 `prompt_toolkit` + `rich`，不依赖 Node.js。
+纯文本交互式对话，基于 `prompt_toolkit` + `rich`，**不依赖 Node.js**，最轻量的启动方式。
 
-### TUI 模式（终端 UI，热重载）
+---
+### TUI 模式
 
 ```powershell
+# 入口同 CLI 模式，使用 --tui 参数区分
+.venv\Scripts\python.exe -m hermes_cli.main --tui
+# TUI 热重载开发模式
 .venv\Scripts\python.exe -m hermes_cli.main --tui --dev
 ```
 
@@ -340,17 +394,143 @@ TUI 的 Ink 渲染器通过 JSON-RPC stdio 与 Python 后端 `tui_gateway` 通�
 > 同时自动执行 `npm install`（如 `node_modules` 缺失）和 `@hermes/ink` 包的预构建。
 > Python 进程通过 `subprocess.call()` spawn Node 子进程，自身等待子进程退出。
 
-### Desktop 模式（Electron 窗口，热重载）
+---
+### Desktop 模式
+
+（1）开发模式：直接启动Vite + Electron
 
 ```powershell
+# dev 表示启动开发模式（Vite 热重载 + Electron 窗口）
 npm run dev --workspace apps/desktop
 ```
 
-同时启动 Vite dev server（`localhost:5174`，前端 HMR）和 Electron 窗口。
-修改 `apps/desktop/src/` 下的 React 代码即时反映；Electron 主进程修改需 Ctrl+C 后重新运行。
+这会同时启动 Vite dev server（`localhost:5174`，前端 HMR）和 Electron 窗口（自动打开）。
+修改 `apps/desktop/src/` 下的 React 代码会即时反映；Electron 主进程修改需 Ctrl+C 重启后重新运行。
 
------------------------------------------------------------------------
-## VS Code 调试配置
+（2）生产模式：构建Electron应用的exe后启动
+
+```powershell
+# 一条命令搞定：安装依赖 → 构建 → 启动 Electron
+npx hermes desktop
+# 或者使用 CLI/TUI 同样的入口，使用 desktop 子命令做区分
+.venv\Scripts\python.exe -m hermes_cli.main desktop
+```
+
+这个命令内部做的事（对应 `cmd_gui` 函数）：
+1. 检查是否有内容哈希构建标记（`$HERMES_HOME/desktop-build-stamp.json`）——若源码未变更则**跳过构建**，直接启动；
+2. 若需要构建：`npm ci`（根目录 workspace 依赖，优先；失败后回退到 `npm install`）；
+3. `npm run pack`（在 desktop 下：tsc 编译 → vite 打包 → electron-builder 产出 win-unpacked/Hermes.exe），写入新的构建标记；
+4. 以子进程启动打包好的Electron应用 `Hermes.exe`。
+
+> **内容哈希跳过机制**：`cmd_gui` 使用 `_desktop_build_needed()` 对比源码树的 SHA-256 哈希与上次成功构建的标记。如果源码未变更，即使多次执行 `hermes desktop` 也不会重复构建，大幅加速重复启动。使用 `--force-build` 可强制重新构建。
+
+支持启动参数设置：
+```powershell
+# 仅构建不启动（--build-only）
+.venv\Scripts\python.exe -m hermes_cli.main desktop --build-only
+# 跳过构建直接启动已有打包产物（--skip-build）
+.venv\Scripts\python.exe -m hermes_cli.main desktop --skip-build
+# 源码模式：electron . 直接跑 dist/（不打包成 exe）
+.venv\Scripts\python.exe -m hermes_cli.main desktop --source
+```
+
+### hermes 子命令与 .exe 入口
+
+`pyproject.toml` 的 `[project.scripts]` 声明了三个可执行入口：
+
+```toml
+[project.scripts]
+hermes       = "hermes_cli.main:main"
+hermes-agent = "run_agent:main"
+hermes-acp   = "acp_adapter.entry:main"
+```
+
+`uv sync` 后，setuptools 在 `.venv\Scripts\` 下自动生成对应的 `.exe` wrapper文件：
+
+| 文件 | 入口 | 用途 |
+|---|---|---|
+| `hermes.exe` | `hermes_cli.main:main` | 交互式 CLI 主程序，包括 CLI 和 TUI，通过有无参数 --tui 区分，也支持 Desktop 模式启动 |
+| `hermes-agent.exe` | `run_agent:main` | 单次 agent 调用 (`AIAgent`)，无交互界面 |
+| `hermes-acp.exe` | `acp_adapter.entry:main` | ACP 适配器，VS Code / Zed / JetBrains 集成 |
+
+这些 `.exe` **不是从源码编译的**，而是由 `distlib`（setuptools 依赖）生成的模板化 launcher，内容固定为：
+1. 硬编码指向 `.venv\Scripts\python.exe`
+2. 硬编码入口模块和函数名
+3. 运行时启动 Python 执行 `from <module> import <func>; <func>()`
+
+每次 `uv sync` 或 `pip install -e .` 会重新生成这些 exe，`.venv/` 在 `.gitignore` 中，不会提交到 Git。
+
+注意，CLI / TUI / Desktop 3种常用模式的启动入口都是 `hermes.exe` ，但是在**开发模式**下，可以跳过 `hermes.exe`: 
+- CLI/TUI 直接调用 `python -m hermes_cli.main` 启动;
+- Desktop 直接使用 `npm run dev --workspace apps/desktop` 启动。
+
+`hermes desktop`（入口 `cmd_gui()`）内部流程：
+1. 检查 `apps/desktop/package.json` 是否存在
+2. 执行 `npm install`（如需要）→ `npm run build`（source 模式）或 `npm run pack`（packaged 模式）
+3. 启动 Electron（source 模式：`electron .`；packaged 模式：直接运行 `release/win-unpacked/Hermes.exe`）
+
+
+**开发环境中的子命令调用方式**（无需打包）：
+
+```powershell
+# 方式一：通过 .exe wrapper（和打包后完全一致）
+.venv\Scripts\hermes.exe config
+.venv\Scripts\hermes.exe model list
+.venv\Scripts\hermes.exe setup
+
+# 方式二：通过 Python 模块
+.venv\Scripts\python.exe -m hermes_cli.main config
+.venv\Scripts\python.exe -m hermes_cli.main model list
+```
+
+两种方式走相同的代码路径：`hermes_cli.main:main()` → argparse 解析子命令 → 分发到对应 handler。
+
+
+---
+### 三种启动方式的关系
+
+```text
+┌─ Desktop (Electron) ─────────────────────────┐
+│ 独立窗口，React UI (@assistant-ui/react)      │
+│ 后端: spawn python -m hermes_cli.main serve   │
+│       (tui_gateway HTTP/WebSocket 子进程)     │
+└──────────────────────────────────────────────┘
+
+┌─ TUI (--tui) ─────────────────────────────────┐
+│ 终端内，Ink/React UI (tsx/node 子进程)         │
+│ 后端: 同进程 tui_gateway (JSON-RPC over stdio) │
+└───────────────────────────────────────────────┘
+
+┌─ CLI (默认) ─────────────────────────────────┐
+│ 终端内，纯文本 (prompt_toolkit + rich)        │
+│ 无分离前后端，全部在同一 Python 进程内         │
+└─────────────────────────────────────────────┘
+```
+
+Desktop 和 TUI 共享同一套 `tui_gateway` JSON-RPC 协议，只是前端渲染层不同。
+
+
+### 其他`hermes`子命令
+
+（1）`hermes dashboard`子命令
+
+它启动一个本地 FastAPI 服务器（Web Dashboard），浏览器访问 `localhost:xxxx`，内部嵌入了 TUI（通过 PTY bridge 把 `hermes --tui` 映射到 xterm.js）。
+
+
+（2）`hermes serve`子命令
+
+它是  `hermes dashboard` 的 **headless 无浏览器版本**的后端，Desktop 的 Electron 主进程正是 spawn `hermes serve` 子进程来启动python后端并提供 JSON-RPC 服务：
+
+```powershell
+# 仅启动后端服务（不打开浏览器），监听 127.0.0.1:9119
+.venv\Scripts\python.exe -m hermes_cli.main serve --no-open
+```
+
+`hermes serve` 和 `hermes dashboard` 共享同一套 `start_server()` 函数，区别仅在于 `serve` 默认不打开浏览器。
+
+
+---
+### VS Code 调试配置
 
 在 `.vscode/launch.json` 中添加：
 
@@ -382,193 +562,6 @@ npm run dev --workspace apps/desktop
             }
         },
         {
-            "name": "Pytest (current file)",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "pytest",
-            "args": ["${file}", "-v", "--tb=short", "--no-header"],
-            "cwd": "${workspaceFolder}",
-            "console": "integratedTerminal",
-            "env": {
-                "HERMES_HOME": "${workspaceFolder}\\.hermes"
-            }
-        }
-    ]
-}
-```
-
------------------------------------------------------------------------
-## 补充说明
-
-### 未安装的可选组件
-
-以下组件在 `install.ps1` 中会被安装，但开发环境不需要：
-
-| 组件 | 影响 | 手动安装命令 |
-|---|---|---|
-| ripgrep (`rg`) | `search_files` 回退到 `findstr`，速度较慢 | `winget install BurntSushi.ripgrep.MSVC` |
-| ffmpeg | TTS 语音消息不可用 | `winget install Gyan.FFmpeg` |
-| agent-browser + Chromium | `browser_navigate` 等浏览器工具不可用 | `npx playwright install chromium` |
-
-### hermes 子命令与 .exe 入口
-
-`pyproject.toml` 的 `[project.scripts]` 声明了三个可执行入口：
-
-```toml
-[project.scripts]
-hermes       = "hermes_cli.main:main"
-hermes-agent = "run_agent:main"
-hermes-acp   = "acp_adapter.entry:main"
-```
-
-`uv sync` 后，setuptools 在 `.venv\Scripts\` 下自动生成对应的 `.exe` 文件：
-
-| 文件 | 入口 | 用途 |
-|---|---|---|
-| `hermes.exe` | `hermes_cli.main:main` | 交互式 CLI 主程序，包括 CLI 和 TUI，通过有无参数 --tui 区分 |
-| `hermes-agent.exe` | `run_agent:main` | 单次 agent 调用 (`AIAgent`)，无交互界面 |
-| `hermes-acp.exe` | `acp_adapter.entry:main` | ACP 适配器，VS Code / Zed / JetBrains 集成 |
-
-此外，`hermes_cli.main` 还注册了 `serve` 子命令（`cmd_dashboard()` 的 headless 模式），
-它是 `hermes dashboard` 的无浏览器版本，Desktop 的 Electron 主进程正是通过 spawn `python -m hermes_cli.main serve` 来启动后端的。
-
-这些 `.exe` **不是从源码编译的**，而是由 `distlib`（setuptools 依赖）生成的模板化 launcher，内容固定为：
-1. 硬编码指向 `.venv\Scripts\python.exe`
-2. 硬编码入口模块和函数名
-3. 运行时启动 Python 执行 `from <module> import <func>; <func>()`
-
-每次 `uv sync` 或 `pip install -e .` 会重新生成这些 exe，`.venv/` 在 `.gitignore` 中，不会提交到 Git。
-
-注意，Desktop启动模式没有对应的 exe 入口。
-
-**开发环境中的子命令调用方式**（无需打包）：
-
-```powershell
-# 方式一：通过 .exe wrapper（和打包后完全一致）
-.venv\Scripts\hermes.exe config
-.venv\Scripts\hermes.exe model list
-.venv\Scripts\hermes.exe setup
-
-# 方式二：通过 Python 模块
-.venv\Scripts\python.exe -m hermes_cli.main config
-.venv\Scripts\python.exe -m hermes_cli.main model list
-```
-
-两种方式走相同的代码路径：`hermes_cli.main:main()` → argparse 解析子命令 → 分发到对应 handler。
-
-### 三种启动方式的关系
-
-```text
-┌─ Desktop (Electron) ─────────────────────────┐
-│ 独立窗口，React UI (@assistant-ui/react)      │
-│ 后端: spawn python -m hermes_cli.main serve   │
-│       (tui_gateway HTTP/WebSocket 子进程)     │
-└──────────────────────────────────────────────┘
-
-┌─ TUI (--tui) ─────────────────────────────────┐
-│ 终端内，Ink/React UI (tsx/node 子进程)         │
-│ 后端: 同进程 tui_gateway (JSON-RPC over stdio) │
-└───────────────────────────────────────────────┘
-
-┌─ CLI (默认) ─────────────────────────────────┐
-│ 终端内，纯文本 (prompt_toolkit + rich)        │
-│ 无分离前后端，全部在同一 Python 进程内         │
-└─────────────────────────────────────────────┘
-```
-
-Desktop 和 TUI 共享同一套 `tui_gateway` JSON-RPC 协议，只是前端渲染层不同。
-
-### hermes serve 与 hermes desktop 子命令
-
-除了 `npm run dev --workspace apps/desktop`，还可以通过 Python CLI 子命令启动 Desktop：
-
-```powershell
-# 构建并启动 Desktop（等同于 npm run dev 的产品化版本）
-.venv\Scripts\python.exe -m hermes_cli.main desktop
-
-# 仅构建不启动（--build-only）
-.venv\Scripts\python.exe -m hermes_cli.main desktop --build-only
-
-# 跳过构建直接启动已有打包产物（--skip-build）
-.venv\Scripts\python.exe -m hermes_cli.main desktop --skip-build
-```
-
-`hermes desktop`（入口 `cmd_gui()`）内部流程：
-1. 检查 `apps/desktop/package.json` 是否存在
-2. 执行 `npm install`（如需要）→ `npm run build`（source 模式）或 `npm run pack`（packaged 模式）
-3. 启动 Electron（source 模式：`electron .`；packaged 模式：直接运行 `release/win-unpacked/Hermes.exe`）
-
-`hermes serve` 是 **headless 无浏览器版本**的后端，Desktop 的 Electron 主进程正是 spawn `hermes serve` 子进程来提供 JSON-RPC 服务：
-
-```powershell
-# 仅启动后端服务（不打开浏览器），监听 127.0.0.1:9119
-.venv\Scripts\python.exe -m hermes_cli.main serve --no-open
-```
-
-`hermes serve` 和 `hermes dashboard` 共享同一套 `start_server()` 函数，区别仅在于 `serve` 默认不打开浏览器。
-
-### Desktop 模式 FAQ
-
-**Q1: Desktop模式启动的 `npm run dev` 脚本在哪？根 `package.json` 里没有这个 key。**
-
-根 `package.json` 的 `workspaces` 数组声明了子工作区 `"apps/*"`，所以 `apps/desktop` 是合法工作区。`--workspace apps/desktop` 让 npm 去 `apps/desktop/package.json` 查找脚本，其中有：
-
-```json
-"dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\""
-```
-
-即同时启动 Vite 前端 dev server（`:5174`）和 Electron 窗口。
-
-**Q2: 如何关闭热更新？**
-
-Vite HMR 通过环境变量控制：
-
-```powershell
-$env:VITE_HMR = "false"; npm run dev --workspace apps/desktop
-```
-
-或手动构建后冷启动（完全无热更新）：
-
-```powershell
-cd apps/desktop
-npm run build          # tsc + vite build → dist/
-npx electron .         # Electron 直接加载 dist/
-```
-
-**Q3: Desktop模式下，Python 后端会自动启动吗？**
-
-会。Electron 主进程（`apps/desktop/electron/main.cjs`）在窗口就绪后自动 spawn Python 后端子进程。
-后端解析优先级为 `HERMES_DESKTOP_HERMES_ROOT` → `SOURCE_REPO_ROOT`（仅开发模式）→ `ACTIVE_HERMES_ROOT`（从 `HERMES_HOME` 推导的 `$HERMES_HOME/hermes-agent`）。
-
-实际 spawn 的命令是 `python -m hermes_cli.main serve`（即 `tui_gateway` 的 HTTP/WebSocket 版本），
-前端通过 JSON-RPC over WebSocket 与它通信。关闭 Electron 窗口时后端自动终止，无需手动管理。
-
-```
-npm run dev
-  ├── Vite (:5174) — 前端 HMR
-  └── Electron 主进程
-        └── spawn python -m hermes_cli.main serve (tui_gateway)
-              └── AIAgent + 工具执行 + 模型调用
-```
-
-**Q4: 能否创建 Desktop 快速启动入口？**
-
-方案 A — `.bat` 脚本：
-
-```batch
-@echo off
-set HERMES_HOME=D:\Path\to\hermes-agent\.hermes
-cd /d D:\Path\to\hermes-agent
-npm run dev --workspace apps/desktop
-```
-
-方案 B — VS Code Task（`.vscode/tasks.json`）：
-
-```json
-{
-    "version": "2.0.0",
-    "tasks": [
-        {
             "label": "Hermes Desktop (dev)",
             "type": "npm",
             "script": "dev",
@@ -584,19 +577,104 @@ npm run dev --workspace apps/desktop
 }
 ```
 
-方案 C — attach 到已运行的 Electron 主进程调试（`.vscode/launch.json`）：
+-----------------------------------------------------------------------
+## Desktop 模式 FAQ
+
+---
+### Q1: Desktop模式启动脚本定义在哪？
+
+**Desktop模式启动的 `npm run dev` 脚本在哪？根 `package.json` 里没有这个 key。**
+
+根 `package.json` 的 `workspaces` 数组声明了子工作区 `"apps/*"`，所以 `apps/desktop` 是合法工作区。
+`--workspace apps/desktop` 让 npm 去 `apps/desktop/package.json` 查找脚本，其中有：
 
 ```json
-{
-    "name": "Attach to Electron Main",
-    "type": "node",
-    "request": "attach",
-    "port": 9229,
-    "sourceMaps": true
-}
+"dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\""
 ```
 
-**Q5: 如何生成类似 install.ps1 的独立 exe 启动入口？**
+即同时启动 Vite 前端 dev server（`:5174`）和 Electron 窗口。
+
+---
+### Q2: 如何关闭热更新？
+
+Vite HMR 通过环境变量控制：
+
+```powershell
+$env:VITE_HMR = "false"; npm run dev --workspace apps/desktop
+```
+
+或手动构建后冷启动（完全无热更新）：
+
+```powershell
+cd apps/desktop
+npm run build          # tsc + vite build → dist/
+npx electron .         # Electron 直接加载 dist/
+```
+
+---
+### Q3: Desktop(Electron) 模式下，Python 后端会自动启动吗？
+
+会。Electron 主进程（`apps/desktop/electron/main.cjs`）在窗口就绪后自动 spawn Python 后端子进程。
+后端解析优先级为 `HERMES_DESKTOP_HERMES_ROOT` → `SOURCE_REPO_ROOT`（仅开发模式）→ `ACTIVE_HERMES_ROOT`（从 `HERMES_HOME` 推导的 `$HERMES_HOME/hermes-agent`）。
+
+实际 spawn 的命令是 `python -m hermes_cli.main serve`（即 `tui_gateway` 的 HTTP/WebSocket 版本），
+前端通过 JSON-RPC over WebSocket 与它通信。关闭 Electron 窗口时后端自动终止，无需手动管理。
+
+```
+npm run dev
+  ├── Vite (:5174) — 前端 HMR
+  └── Electron 主进程
+        └── spawn python -m hermes_cli.main serve (tui_gateway)
+              └── AIAgent + 工具执行 + 模型调用
+```
+
+---
+### Q4: `install.ps1` 默认会构建 Desktop 并创建快捷方式吗？
+
+**不会。** Desktop 构建是**显式 opt-in** 的，只有传递 `-IncludeDesktop` 参数时才会触发。
+
+具体来说：
+- **普通 CLI 用户**运行 `irm https://hermes-agent.nousresearch.com/install.ps1 | iex` → **不会**构建 Desktop，不会创建快捷方式
+- **通过 Hermes-Setup.exe（GUI 安装器）**安装时 → 会传递 `-IncludeDesktop`，构建 Desktop 并在 Start Menu 和 Desktop 创建 `.lnk` 快捷方式
+- 快捷方式指向打包好的 `apps\desktop\release\win-unpacked\Hermes.exe`（Electron 二进制），**而非** `venv\Scripts\hermes.exe desktop`
+
+源码中的注释明确说明了设计意图（`install.ps1` 第 46-58 行）：
+
+> The canonical CLI one-liner (irm | iex) omits the flag too; terminal users don't need a desktop binary built for them, and `hermes desktop` already builds on demand.
+
+---
+
+### Q5: Electron快捷方式启动 vs `hermes desktop` 命令，效果一样吗？
+
+**最终启动的桌面应用界面完全相同，但启动路径不同，且使用的数据/配置目录可能不同。**
+
+| | 快捷方式（直接启动打包 exe） | `hermes desktop` |
+|---|---|---|
+| 启动路径 | Explorer 直接运行打包好的 Electron 应用 | Python `cmd_gui()` → 检查构建 → `subprocess.run([Hermes.exe])` |
+| 构建开销 | 无（秒开） | 有内容哈希跳过机制，但首次/有变更时需完整构建 |
+| `HERMES_HOME`解析 | Electron 自己调用 `resolveHermesHome()` 解析 | 继承当前终端 shell 的 `HERMES_HOME` 环境变量 |
+
+> `hermes desktop` 底层最终也是打包Electron exe应用，然后在子进程中调用执行它。
+
+关键差异在于 `HERMES_HOME` 的解析：
+
+- `hermes desktop`：`cmd_gui()` 复制当前进程的 `os.environ`，传递给子进程里执行的 `Hermes.exe`，所以 `HERMES_HOME` 继承自当前终端的环境变量。
+
+- 快捷方式启动：由 Explorer 直接启动，不经过任何终端。`resolveHermesHome()`（`main.cjs` 第 290-320 行）按以下优先级解析：
+  1. `HERMES_HOME` 环境变量（如果有）
+  2. Windows：从注册表读取 User 级别的 `HERMES_HOME`（`setx` 持久化的值）
+  3. Windows 默认：`%LOCALAPPDATA%\hermes`
+  4. macOS/Linux 默认：`~/.hermes`
+
+这意味着：
+- 如果使用`install.ps1`安装时通过 `[Environment]::SetEnvironmentVariable("HERMES_HOME", ..., "User")` **持久化**了 `HERMES_HOME`，两种方式完全等价，使用相同的配置/数据/venv。
+- 如果只在终端会话中**临时**设置了 `$env:HERMES_HOME`，快捷方式启动时读不到它，会回退到 `%LOCALAPPDATA%\hermes`——这就是两者可能使用不同数据目录的情况。
+- 后端 Python 进程（`python -m hermes_cli.main serve`）由 Electron spawn，继承 Electron 设置的环境变量，所以后端的 `HERMES_HOME` 始终一致。
+
+---
+### Q6: 如何生成类似 install.ps1 的独立 exe 启动入口？
+
+`install.ps1 -IncludeDesktop` 本质上就是执行 `npm run pack`，产出一个独立的 `Hermes.exe`，完全可以手动完成同样的操作。
 
 在开发环境中执行打包构建：
 
@@ -605,7 +683,13 @@ cd apps/desktop
 npm run pack
 ```
 
-内部流程：`npm run build`（`tsc -b` + `vite build` + stamp/native-deps 脚本）→ `npm run builder -- --dir`（`electron-builder --dir`）产出 `win-unpacked/`。
+内部流程：
+
+```powershell
+npm run pack
+  └── npm run build          # tsc 编译 + vite 打包 → dist/
+  └── npm run builder -- --dir  # electron-builder 产出 win-unpacked/
+```
 
 产物位置：
 
@@ -633,19 +717,23 @@ apps/desktop/release/win-unpacked/Hermes.exe
 )
 ```
 
-打包后的 `Hermes.exe` **不依赖系统 Node.js**。Electron 内嵌了自带的 Node.js 运行时（打包在 `win-unpacked/` 中），启动时完全自包含。
-而且`electron-builder`在打包时会将Electron的二进制文件（`electron.exe`重命名为`Hermes.exe`）和`node_modules`一起放进 `win-unpacked`。
-系统 Node.js 仅在 `npm run pack` 构建阶段使用（`tsc`、`vite`、`electron-builder`），产出的 exe 与系统 Node.js 无关。
-后端是 Python 进程（`python -m hermes_cli.main serve`），由 `HERMES_DESKTOP_HERMES_ROOT` 指向的 venv 中的 Python 解释器运行，也不需要 Node.js。
+几点说明：
+- 打包后的 `Hermes.exe` **不依赖系统 Node.js**。Electron 内嵌了自带的 Node.js 运行时（打包在 `win-unpacked/` 中），启动时完全自包含。
+- 而且`electron-builder`在打包时会将Electron的二进制文件（`electron.exe`重命名为`Hermes.exe`）和`node_modules`一起放进 `win-unpacked`。
+- 系统 Node.js 仅在 `npm run pack` 构建阶段使用（`tsc`、`vite`、`electron-builder`），产出的 exe 与系统 Node.js 无关。
+- 后端是 Python 进程（`python -m hermes_cli.main serve`），由 `HERMES_DESKTOP_HERMES_ROOT` 指向的 venv 中的 Python 解释器运行，也不需要 Node.js。
 
-**Q6: 打包后的 exe 和项目文件夹移动到其他位置还能运行吗？**
+---
+### Q7: 打包后的 exe 和项目文件夹移动到其他位置还能运行吗？
 
 可以，但需要同时设置两个环境变量指向新位置。
 
 `main.cjs` 中后端解析优先级为：
 
 ```
-HERMES_DESKTOP_HERMES_ROOT（最高）→ SOURCE_REPO_ROOT（仅开发模式）→ ACTIVE_HERMES_ROOT（从 HERMES_HOME 推导）
+HERMES_DESKTOP_HERMES_ROOT（最高）
+  → SOURCE_REPO_ROOT（仅开发模式）
+  → ACTIVE_HERMES_ROOT（从 HERMES_HOME 推导）
 ```
 
 假设项目从 `D:\old\hermes-agent` 移动到 `E:\new\hermes-agent`：
@@ -671,6 +759,34 @@ HERMES_DESKTOP_HERMES_ROOT（最高）→ SOURCE_REPO_ROOT（仅开发模式）�
 - `APP_ROOT` 和 `SOURCE_REPO_ROOT` 是构建时 baked-in 的路径，但打包模式下它们不影响后端解析。
 - 启动后检查 `$HERMES_HOME\logs\` 下的日志确认后端是否正常连接。
 
+
+-----------------------------------------------------------------------
+## 补充说明
+
+### 未安装的可选组件
+
+以下组件在 `install.ps1` 中会被安装，但开发环境不需要：
+
+| 组件 | 影响 | 手动安装命令 |
+|---|---|---|
+| ripgrep (`rg`) | `search_files` 回退到 `findstr`，速度较慢 | `winget install BurntSushi.ripgrep.MSVC` |
+| ffmpeg | TTS 语音消息不可用 | `winget install Gyan.FFmpeg` |
+| agent-browser + Chromium | `browser_navigate` 等浏览器工具不可用 | `npx playwright install chromium` |
+
+
+### 与 install.ps1 的关键差异
+
+| 项目 | install.ps1 | 本方案 |
+|---|---|---|
+| UV | 下载独立 UV 到 `%LOCALAPPDATA%\hermes\bin\` | 使用系统已有 UV |
+| Git | 下载 PortableGit 到 `%LOCALAPPDATA%\hermes\git\` | 使用系统已有 Git |
+| Node.js | 下载便携版到 `%LOCALAPPDATA%\hermes\node\` | 使用系统已有 Node.js |
+| 源码 | clone 到 `%LOCALAPPDATA%\hermes\hermes-agent\` | 当前仓库即源码 |
+| HERMES_HOME | `%LOCALAPPDATA%\hermes` | 仓库内 `.hermes\` |
+| PATH 修改 | 将 `$HermesHome\bin` 和 `venv\Scripts` 写入 User PATH | 不修改 PATH |
+| ripgrep/ffmpeg | 通过 winget 安装 | 跳过 |
+
+
 ### 关键文件速查
 
 | 文件 | 作用 |
@@ -687,15 +803,3 @@ HERMES_DESKTOP_HERMES_ROOT（最高）→ SOURCE_REPO_ROOT（仅开发模式）�
 | `pyproject.toml` — `[project.scripts]` | 三个控制台入口：`hermes` / `hermes-agent` / `hermes-acp` |
 | `pyproject.toml` — `[project.optional-dependencies] dev` | 开发依赖清单 |
 | `scripts/run_tests.sh` | 测试入口（需 Git Bash），设置 TZ=UTC 等 CI 一致环境 |
-
-### 与 install.ps1 的关键差异
-
-| 项目 | install.ps1 | 本方案 |
-|---|---|---|
-| UV | 下载独立 UV 到 `%LOCALAPPDATA%\hermes\bin\` | 使用系统已有 UV |
-| Git | 下载 PortableGit 到 `%LOCALAPPDATA%\hermes\git\` | 使用系统已有 Git |
-| Node.js | 下载便携版到 `%LOCALAPPDATA%\hermes\node\` | 使用系统已有 Node.js |
-| 源码 | clone 到 `%LOCALAPPDATA%\hermes\hermes-agent\` | 当前仓库即源码 |
-| HERMES_HOME | `%LOCALAPPDATA%\hermes` | 仓库内 `.hermes\` |
-| PATH 修改 | 将 `$HermesHome\bin` 和 `venv\Scripts` 写入 User PATH | 不修改 PATH |
-| ripgrep/ffmpeg | 通过 winget 安装 | 跳过 |
